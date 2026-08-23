@@ -1,0 +1,29 @@
+{
+  "best_model": "XGBoost",
+  "n_features_all": 25,
+  "n_features_selected": 12,
+  "selected_features": [
+    "Std",
+    "TumorLiverContrast",
+    "LiverEntropy",
+    "Compactness",
+    "SurfaceArea",
+    "GLCM_Correlation",
+    "Mean",
+    "Skewness",
+    "GLCM_Homogeneity",
+    "MaxDiameter",
+    "Kurtosis",
+    "Entropy"
+  ],
+  "cv_f1_macro_mean": 0.8267760177140702,
+  "cv_f1_macro_std": 0.04165675533952453,
+  "test_metrics": {
+    "Accuracy": 0.8085106382978723,
+    "Balanced Accuracy": 0.7672641509433962,
+    "Precision (macro)": 0.7611283643892339,
+    "Recall (macro)": 0.7672641509433962,
+    "F1 (macro)": 0.7631649892163911,
+    "ROC-AUC (OVR, weighted)": 0.9097021522733939
+  }
+}

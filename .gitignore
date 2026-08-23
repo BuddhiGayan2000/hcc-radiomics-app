@@ -1,0 +1,22 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+*.pyc
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Environment files (never commit real secrets/config; .env.example is the template)
+backend/.env
+frontend/.env
+
+# Editor/OS
+.DS_Store
+.vscode/
+.idea/
+
+# Patient data (private, must never be committed)
+HCC 010 final/

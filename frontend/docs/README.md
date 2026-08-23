@@ -1,0 +1,1 @@
+Frontend-specific deep-dive docs are intentionally kept in the shared [`/docs`](../../docs/) folder (feature mapping, parity testing) since they describe things the frontend and backend must agree on — duplicating them here would risk them drifting out of sync. See [../README.md](../README.md) for frontend-specific documentation.

@@ -1,0 +1,16 @@
+# Pinned to the versions verified working against the delivered .joblib models
+# during initial setup (2026-08-23). See backend/docs/MODEL_LOADING.md for the
+# InconsistentVersionWarning you will see on startup — it is expected and harmless.
+fastapi==0.141.1
+uvicorn[standard]==0.34.0
+pydantic==2.13.4
+python-dotenv==1.2.3
+
+scikit-learn==1.8.0
+imbalanced-learn==0.14.2
+xgboost==3.2.0
+lightgbm==4.7.0
+shap==0.52.0
+joblib==1.5.3
+numpy
+pandas
