@@ -20,3 +20,4 @@ frontend/.env
 
 # Patient data (private, must never be committed)
 HCC 010 final/
+/PT 01/

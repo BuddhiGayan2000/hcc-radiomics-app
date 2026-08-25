@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import {
   AlertTriangle, Activity, FileWarning, Info,
-  RotateCcw, Upload, Check, ArrowRight, Eraser, Undo2,
+  RotateCcw, FolderOpen, Check, ArrowRight, Eraser, Undo2, Loader2,
 } from "lucide-react";
 
 // ============================================================================
@@ -64,330 +64,29 @@ const GROUP_LABELS = { morph: "Morphological (7)", first: "First-order Intensity
 // ============================================================================
 // IMAGE HELPERS
 // ============================================================================
-function loadImageToCanvas(file, canvasEl, maxDim = 512) {
+function loadDataUrlToCanvas(dataUrl, canvasEl) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-        const w = Math.round(img.width * scale);
-        const h = Math.round(img.height * scale);
-        canvasEl.width = w;
-        canvasEl.height = h;
-        const ctx = canvasEl.getContext("2d");
-        ctx.drawImage(img, 0, 0, w, h);
-        resolve(ctx.getImageData(0, 0, w, h));
-      };
-      img.onerror = reject;
-      img.src = e.target.result;
+    const img = new Image();
+    img.onload = () => {
+      canvasEl.width = img.width;
+      canvasEl.height = img.height;
+      canvasEl.getContext("2d").drawImage(img, 0, 0);
+      resolve({ width: img.width, height: img.height });
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    img.onerror = reject;
+    img.src = dataUrl;
   });
 }
 
-function toGray(imageData) {
-  const { data, width, height } = imageData;
-  const out = new Float32Array(width * height);
-  for (let i = 0; i < width * height; i++) {
-    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
-    out[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-  }
-  return out;
-}
-
-function subtractImages(postData, preData) {
-  const w = postData.width, h = postData.height;
-  const post = toGray(postData);
-  const pre = toGray(preData);
-  const n = w * h;
-  const raw = new Float32Array(n);
-  for (let i = 0; i < n; i++) raw[i] = Math.max(0, post[i] - pre[i]);
-
-  let max = 0;
-  for (let i = 0; i < n; i++) if (raw[i] > max) max = raw[i];
-  max = max || 1;
-
-  const display = new ImageData(w, h);
-  for (let i = 0; i < n; i++) {
-    const v = Math.round((raw[i] / max) * 255);
-    display.data[i * 4] = v;
-    display.data[i * 4 + 1] = v;
-    display.data[i * 4 + 2] = v;
-    display.data[i * 4 + 3] = 255;
-  }
-  return { raw, display, width: w, height: h };
-}
-
-function pointInPolygon(x, y, poly) {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function rasterizeMask(poly, width, height) {
-  const mask = new Uint8Array(width * height);
-  if (poly.length < 3) return mask;
-  let minX = width, maxX = 0, minY = height, maxY = 0;
-  poly.forEach((p) => {
-    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-  });
-  minX = Math.max(0, Math.floor(minX)); maxX = Math.min(width - 1, Math.ceil(maxX));
-  minY = Math.max(0, Math.floor(minY)); maxY = Math.min(height - 1, Math.ceil(maxY));
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      if (pointInPolygon(x + 0.5, y + 0.5, poly)) mask[y * width + x] = 1;
-    }
-  }
-  return mask;
-}
-
 // ============================================================================
-// FEATURE EXTRACTION (genuine computation from real pixel data + mask)
-// ============================================================================
-function shannonEntropy(vals, nBins = 32) {
-  if (vals.length === 0) return NaN;
-  let min = Infinity, max = -Infinity;
-  for (const v of vals) { if (v < min) min = v; if (v > max) max = v; }
-  if (max === min) return 0;
-  const counts = new Array(nBins).fill(0);
-  for (const v of vals) {
-    let b = Math.floor(((v - min) / (max - min)) * nBins);
-    if (b >= nBins) b = nBins - 1;
-    counts[b]++;
-  }
-  const n = vals.length;
-  let h = 0;
-  for (const c of counts) if (c > 0) { const p = c / n; h -= p * Math.log2(p); }
-  return h;
-}
-
-function firstOrderStats(vals) {
-  const n = vals.length;
-  if (n === 0) return { Mean: NaN, Median: NaN, Min: NaN, Max: NaN, Std: NaN, Skewness: NaN, Kurtosis: NaN, Entropy: NaN };
-  const sorted = [...vals].sort((a, b) => a - b);
-  const mean = vals.reduce((a, b) => a + b, 0) / n;
-  const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-  const std = Math.sqrt(variance);
-  const skew = std > 0 ? vals.reduce((a, b) => a + ((b - mean) / std) ** 3, 0) / n : 0;
-  const kurt = std > 0 ? vals.reduce((a, b) => a + ((b - mean) / std) ** 4, 0) / n : 0;
-  return {
-    Mean: mean, Median: sorted[Math.floor(n / 2)], Min: sorted[0], Max: sorted[n - 1],
-    Std: std, Skewness: skew, Kurtosis: kurt, Entropy: shannonEntropy(vals),
-  };
-}
-
-function shapeStats(mask, width, height) {
-  let area = 0, sumX = 0, sumY = 0;
-  const pts = [];
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (mask[y * width + x]) { area++; sumX += x; sumY += y; pts.push([x, y]); }
-    }
-  }
-  if (area === 0) {
-    return { Volume: 0, Area: 0, MaxDiameter: 0, SurfaceArea: 0, Sphericity: 0, Compactness: 0, Elongation: 1 };
-  }
-  const cx = sumX / area, cy = sumY / area;
-
-  let perimeter = 0;
-  const boundary = [];
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (!mask[y * width + x]) continue;
-      const up = y > 0 ? mask[(y - 1) * width + x] : 0;
-      const down = y < height - 1 ? mask[(y + 1) * width + x] : 0;
-      const left = x > 0 ? mask[y * width + x - 1] : 0;
-      const right = x < width - 1 ? mask[y * width + x + 1] : 0;
-      if (!up || !down || !left || !right) { perimeter++; boundary.push([x, y]); }
-    }
-  }
-
-  const step = Math.max(1, Math.floor(boundary.length / 150));
-  const sample = boundary.filter((_, i) => i % step === 0);
-  let maxDiameter = 0;
-  for (let i = 0; i < sample.length; i++) {
-    for (let j = i + 1; j < sample.length; j++) {
-      const dx = sample[i][0] - sample[j][0], dy = sample[i][1] - sample[j][1];
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d > maxDiameter) maxDiameter = d;
-    }
-  }
-
-  let sxx = 0, syy = 0, sxy = 0;
-  for (const [x, y] of pts) { sxx += (x - cx) ** 2; syy += (y - cy) ** 2; sxy += (x - cx) * (y - cy); }
-  sxx /= area; syy /= area; sxy /= area;
-  const tr = sxx + syy, det = sxx * syy - sxy * sxy;
-  const disc = Math.sqrt(Math.max(0, (tr * tr) / 4 - det));
-  const l1 = tr / 2 + disc, l2 = Math.max(1e-6, tr / 2 - disc);
-  const elongation = Math.sqrt(l1 / l2);
-
-  const sphericity = (4 * Math.PI * area) / (perimeter * perimeter + 1e-9);
-  const compactness = area / (perimeter * perimeter + 1e-9);
-
-  return {
-    Volume: area, Area: area, MaxDiameter: maxDiameter, SurfaceArea: perimeter,
-    Sphericity: sphericity, Compactness: compactness, Elongation: elongation,
-  };
-}
-
-function bbox(mask, width, height) {
-  let minX = width, maxX = -1, minY = height, maxY = -1;
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    if (mask[y * width + x]) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
-  }
-  return maxX < 0 ? null : { minX, maxX, minY, maxY };
-}
-
-function glcmFeatures(raw, mask, width, height, nLevels = 24) {
-  const bb = bbox(mask, width, height);
-  const empty = { GLCM_Contrast: NaN, GLCM_Correlation: NaN, GLCM_Homogeneity: NaN, GLCM_Energy: NaN, GLCM_Entropy: NaN };
-  if (!bb) return empty;
-  const roiVals = [];
-  for (let y = bb.minY; y <= bb.maxY; y++) for (let x = bb.minX; x <= bb.maxX; x++)
-    if (mask[y * width + x]) roiVals.push(raw[y * width + x]);
-  if (roiVals.length === 0) return empty;
-  const min = Math.min(...roiVals), max = Math.max(...roiVals);
-  if (max === min) return empty;
-
-  const q = new Int16Array(width * height).fill(-1);
-  for (let y = bb.minY; y <= bb.maxY; y++) for (let x = bb.minX; x <= bb.maxX; x++) {
-    if (!mask[y * width + x]) continue;
-    let lvl = Math.floor(((raw[y * width + x] - min) / (max - min)) * (nLevels - 1));
-    lvl = Math.max(0, Math.min(nLevels - 1, lvl));
-    q[y * width + x] = lvl;
-  }
-
-  const glcm = Array.from({ length: nLevels }, () => new Float64Array(nLevels));
-  const offsets = [[1, 0], [1, 1], [0, 1], [-1, 1]];
-  let total = 0;
-  for (const [dx, dy] of offsets) {
-    for (let y = bb.minY; y <= bb.maxY; y++) for (let x = bb.minX; x <= bb.maxX; x++) {
-      const a = q[y * width + x]; if (a < 0) continue;
-      const nx = x + dx, ny = y + dy;
-      if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-      const b = q[ny * width + nx]; if (b < 0) continue;
-      glcm[a][b]++; glcm[b][a]++; total += 2;
-    }
-  }
-  if (total === 0) return empty;
-  for (let i = 0; i < nLevels; i++) for (let j = 0; j < nLevels; j++) glcm[i][j] /= total;
-
-  let contrast = 0, energy = 0, entropy = 0, meanI = 0, meanJ = 0;
-  for (let i = 0; i < nLevels; i++) for (let j = 0; j < nLevels; j++) {
-    const p = glcm[i][j];
-    contrast += p * (i - j) ** 2;
-    energy += p * p;
-    if (p > 0) entropy -= p * Math.log2(p);
-    meanI += i * p; meanJ += j * p;
-  }
-  let varI = 0, varJ = 0, correlation = 0, homogeneity = 0;
-  for (let i = 0; i < nLevels; i++) for (let j = 0; j < nLevels; j++) {
-    const p = glcm[i][j];
-    varI += p * (i - meanI) ** 2; varJ += p * (j - meanJ) ** 2;
-    homogeneity += p / (1 + Math.abs(i - j));
-  }
-  const stdI = Math.sqrt(varI), stdJ = Math.sqrt(varJ);
-  if (stdI > 0 && stdJ > 0) {
-    for (let i = 0; i < nLevels; i++) for (let j = 0; j < nLevels; j++)
-      correlation += (glcm[i][j] * (i - meanI) * (j - meanJ)) / (stdI * stdJ);
-  }
-
-  return { GLCM_Contrast: contrast, GLCM_Correlation: correlation, GLCM_Homogeneity: homogeneity, GLCM_Energy: energy, GLCM_Entropy: entropy };
-}
-
-function glrlmFeatures(raw, mask, width, height, nLevels = 12) {
-  const bb = bbox(mask, width, height);
-  const empty = { SRE: NaN, LRE: NaN, GLN: NaN };
-  if (!bb) return empty;
-  const roiVals = [];
-  for (let y = bb.minY; y <= bb.maxY; y++) for (let x = bb.minX; x <= bb.maxX; x++)
-    if (mask[y * width + x]) roiVals.push(raw[y * width + x]);
-  if (roiVals.length === 0) return empty;
-  const min = Math.min(...roiVals), max = Math.max(...roiVals);
-  if (max === min) return empty;
-
-  const q = new Int16Array(width * height).fill(0);
-  for (let y = bb.minY; y <= bb.maxY; y++) for (let x = bb.minX; x <= bb.maxX; x++) {
-    if (!mask[y * width + x]) continue;
-    let lvl = Math.floor(((raw[y * width + x] - min) / (max - min)) * (nLevels - 1)) + 1;
-    lvl = Math.max(1, Math.min(nLevels, lvl));
-    q[y * width + x] = lvl;
-  }
-
-  const maxRun = Math.max(bb.maxX - bb.minX + 1, bb.maxY - bb.minY + 1);
-  const P = Array.from({ length: nLevels + 1 }, () => new Float64Array(maxRun + 1));
-  const dirs = [[0, 1], [1, 0], [1, 1], [1, -1]];
-
-  for (const [dx, dy] of dirs) {
-    const visited = new Uint8Array(width * height);
-    for (let y = bb.minY; y <= bb.maxY; y++) for (let x = bb.minX; x <= bb.maxX; x++) {
-      const idx = y * width + x;
-      if (q[idx] === 0 || visited[idx]) continue;
-      const level = q[idx];
-      let runLen = 1; visited[idx] = 1;
-      let px = x + dx, py = y + dy;
-      while (px >= bb.minX && px <= bb.maxX && py >= bb.minY && py <= bb.maxY && q[py * width + px] === level) {
-        visited[py * width + px] = 1; runLen++; px += dx; py += dy;
-      }
-      P[level][Math.min(runLen, maxRun)]++;
-    }
-  }
-  let Nr = 0;
-  for (let l = 1; l <= nLevels; l++) for (let r = 1; r <= maxRun; r++) Nr += P[l][r];
-  if (Nr === 0) return empty;
-
-  let SRE = 0, LRE = 0, GLN = 0;
-  for (let l = 1; l <= nLevels; l++) {
-    let rowSum = 0;
-    for (let r = 1; r <= maxRun; r++) {
-      SRE += P[l][r] / (r * r);
-      LRE += P[l][r] * (r * r);
-      rowSum += P[l][r];
-    }
-    GLN += rowSum * rowSum;
-  }
-  return { SRE: SRE / Nr, LRE: LRE / Nr, GLN: GLN / Nr };
-}
-
-function liverContextFeatures(raw, mask, width, height, tumorMean) {
-  const n = width * height;
-  let thresh = 0;
-  { const sorted = Array.from(raw).sort((a, b) => a - b); thresh = sorted[Math.floor(n * 0.1)]; }
-  const contextVals = [];
-  for (let i = 0; i < n; i++) if (!mask[i] && raw[i] > thresh) contextVals.push(raw[i]);
-  const liverEntropy = shannonEntropy(contextVals);
-  const liverMean = contextVals.length ? contextVals.reduce((a, b) => a + b, 0) / contextVals.length : NaN;
-  const tumorLiverContrast = Math.abs(tumorMean - liverMean) / (Math.abs(liverMean) + 1e-6);
-  return { LiverEntropy: liverEntropy, TumorLiverContrast: tumorLiverContrast };
-}
-
-function extractAllFeatures(raw, mask, width, height) {
-  const roiVals = [];
-  for (let i = 0; i < width * height; i++) if (mask[i]) roiVals.push(raw[i]);
-  const fo = firstOrderStats(roiVals);
-  const shape = shapeStats(mask, width, height);
-  const glcm = glcmFeatures(raw, mask, width, height);
-  const rlm = glrlmFeatures(raw, mask, width, height);
-  const liverCtx = liverContextFeatures(raw, mask, width, height, fo.Mean);
-  return { ...shape, ...fo, ...glcm, ...rlm, ...liverCtx };
-}
-
-// ============================================================================
-// REAL MODEL INFERENCE — calls the local FastAPI server (hcc_inference_api.py)
-// that loads your actual trained .joblib models. A browser cannot execute
-// those pickles directly, so this API is required; see the README note in
-// the UI if the call fails (most likely cause: API not running).
+// BACKEND API — series upload/subtract/extract + model inference.
+// A browser cannot parse raw DICOM or execute the trained .joblib pickles
+// directly, so the local FastAPI server handles both. See backend/SETUP.md
+// if these calls fail (most likely cause: API not running).
 // ============================================================================
 const STAGING_MODEL_OPTIONS = ["XGBoost", "LightGBM", "RandomForest", "GradientBoosting"];
 
-async function callPredictAPI(apiBase, path, body) {
+async function postJSON(apiBase, path, body) {
   const res = await fetch(`${apiBase}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -400,10 +99,43 @@ async function callPredictAPI(apiBase, path, body) {
   return res.json();
 }
 
+async function uploadDicomSeries(apiBase, phase, files) {
+  const form = new FormData();
+  form.append("phase", phase);
+  files.forEach((f) => form.append("files", f, f.name));
+  const res = await fetch(`${apiBase}/series/upload`, { method: "POST", body: form });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${res.status} ${res.statusText} — ${text}`);
+  }
+  return res.json();
+}
+
+function subtractDicomSeries(apiBase, postSessionId, preSessionId) {
+  return postJSON(apiBase, "/series/subtract", {
+    post_session_id: postSessionId,
+    pre_session_id: preSessionId,
+  });
+}
+
+function extractFeaturesFromSlice(apiBase, postSessionId, preSessionId, sliceIndex, roi) {
+  return postJSON(apiBase, "/series/extract", {
+    post_session_id: postSessionId,
+    pre_session_id: preSessionId,
+    slice_index: sliceIndex,
+    roi,
+  });
+}
+
+function deleteSessionBestEffort(apiBase, sessionId) {
+  if (!sessionId) return;
+  fetch(`${apiBase}/series/session/${sessionId}`, { method: "DELETE" }).catch(() => {});
+}
+
 async function runRealModel(apiBase, stagingModel, features) {
   const [stageRes, necroticRes] = await Promise.all([
-    callPredictAPI(apiBase, "/predict/stage", { model: stagingModel, features }),
-    callPredictAPI(apiBase, "/predict/necrotic", { features }),
+    postJSON(apiBase, "/predict/stage", { model: stagingModel, features }),
+    postJSON(apiBase, "/predict/necrotic", { features }),
   ]);
 
   // Prefer the staging model's SHAP contributions for the evidence panel;
@@ -452,12 +184,12 @@ function Stepper({ step }) {
   );
 }
 
-function UploadStep({ title, subtitle, onFile, previewCanvasRef, loaded, onNext, canGoBack, onBack }) {
+function SeriesUploadStep({ title, subtitle, files, onFilesChange, onContinue, uploading, error, canGoBack, onBack }) {
   const inputRef = useRef(null);
   return (
     <div className="rounded-lg p-8 border flex flex-col items-center text-center" style={{ background: COLORS.panel, borderColor: COLORS.hairline }}>
       <div className="w-12 h-12 rounded-full flex items-center justify-center mb-3" style={{ background: COLORS.tealSoft }}>
-        <Upload size={22} color={COLORS.teal} />
+        <FolderOpen size={22} color={COLORS.teal} />
       </div>
       <div className="text-lg font-semibold mb-1" style={{ color: COLORS.ink }}>{title}</div>
       <div className="text-sm mb-5" style={{ color: COLORS.inkSoft }}>{subtitle}</div>
@@ -465,29 +197,47 @@ function UploadStep({ title, subtitle, onFile, previewCanvasRef, loaded, onNext,
       <input
         ref={inputRef}
         type="file"
-        accept="image/*"
+        accept=".dcm"
+        multiple
         className="hidden"
-        onChange={(e) => e.target.files[0] && onFile(e.target.files[0])}
+        onChange={(e) => e.target.files.length && onFilesChange(Array.from(e.target.files))}
       />
 
-      <canvas
-        ref={previewCanvasRef}
-        className="max-w-full rounded border mb-4"
-        style={{ borderColor: COLORS.hairline, maxHeight: 320, display: loaded ? "block" : "none" }}
-      />
+      {files.length > 0 && (
+        <div className="w-full max-w-sm rounded border mb-4 p-3 text-left text-xs" style={{ borderColor: COLORS.hairline }}>
+          <div className="font-semibold mb-1" style={{ color: COLORS.ink }}>
+            {files.length} DICOM file{files.length === 1 ? "" : "s"} selected
+          </div>
+          <div className="max-h-24 overflow-y-auto space-y-0.5" style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLORS.inkSoft }}>
+            {files.slice(0, 6).map((f) => <div key={f.name} className="truncate">{f.name}</div>)}
+            {files.length > 6 && <div>&hellip; and {files.length - 6} more</div>}
+          </div>
+        </div>
+      )}
 
-      {!loaded ? (
+      {error && (
+        <div className="text-xs mb-3 px-3 py-2 rounded flex gap-2 items-start text-left" style={{ background: "#FBEAE8", color: "#7A2A21" }}>
+          <AlertTriangle size={13} className="shrink-0 mt-0.5" /> {error}
+        </div>
+      )}
+
+      {files.length === 0 ? (
         <button onClick={() => inputRef.current.click()} className="px-4 py-2 rounded-md text-sm font-medium text-white" style={{ background: COLORS.teal }}>
-          Choose image file&hellip;
+          Choose DICOM files&hellip;
         </button>
       ) : (
         <div className="w-full flex flex-col items-center">
           <div className="flex gap-2">
             <button onClick={() => inputRef.current.click()} className="px-3 py-1.5 rounded-md text-xs border" style={{ borderColor: COLORS.hairline, color: COLORS.inkSoft }}>
-              Replace file
+              Replace files
             </button>
-            <button onClick={onNext} className="px-4 py-1.5 rounded-md text-xs font-medium text-white flex items-center gap-1" style={{ background: COLORS.teal }}>
-              Continue <ArrowRight size={13} />
+            <button
+              onClick={onContinue}
+              disabled={uploading}
+              className="px-4 py-1.5 rounded-md text-xs font-medium text-white flex items-center gap-1 disabled:opacity-50"
+              style={{ background: COLORS.teal }}
+            >
+              {uploading ? (<><Loader2 size={13} className="animate-spin" /> Uploading&hellip;</>) : (<>Continue <ArrowRight size={13} /></>)}
             </button>
           </div>
         </div>
@@ -495,9 +245,9 @@ function UploadStep({ title, subtitle, onFile, previewCanvasRef, loaded, onNext,
 
       <div className="text-[11px] mt-5 px-3 py-2 rounded flex gap-2 items-start text-left" style={{ background: "#FBFAF7", color: COLORS.inkSoft }}>
         <Info size={13} className="shrink-0 mt-0.5" />
-        Accepts PNG/JPEG/BMP. DICOM files must be exported/converted to a
-        standard image format first — this prototype cannot parse raw DICOM
-        in-browser.
+        Select every .dcm file in this phase&rsquo;s series folder (use Ctrl/Cmd+A
+        in the file picker). Slices are matched between phases by filename, so
+        both series must use the same naming pattern (e.g. 1-01.dcm, 1-02.dcm&hellip;).
       </div>
 
       {canGoBack && (
@@ -505,6 +255,36 @@ function UploadStep({ title, subtitle, onFile, previewCanvasRef, loaded, onNext,
           &larr; Back
         </button>
       )}
+    </div>
+  );
+}
+
+function SliceGallery({ slices, onSelect }) {
+  return (
+    <div>
+      <div className="text-xs mb-3 px-3 py-2 rounded flex gap-2 items-start" style={{ background: COLORS.tealSoft, color: COLORS.teal }}>
+        <Info size={14} className="shrink-0 mt-0.5" />
+        {slices.length} matching slices were aligned and subtracted (post &minus; pre).
+        Pick the slice that shows the clearest tumor enhancement.
+      </div>
+      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+        {slices.map((s) => (
+          <button
+            key={s.index}
+            onClick={() => onSelect(s)}
+            className="rounded border overflow-hidden hover:ring-2 transition"
+            style={{ borderColor: COLORS.hairline }}
+          >
+            <img
+              src={s.image_data_b64}
+              alt={`Slice ${s.index}`}
+              className="w-full block"
+              style={{ aspectRatio: "1 / 1", objectFit: "cover" }}
+            />
+            <div className="text-[10px] py-1" style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLORS.inkSoft }}>#{s.index}</div>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -613,16 +393,29 @@ export default function App() {
   const [predictError, setPredictError] = useState(null);
   const [result, setResult] = useState(null);
 
-  const postCanvasRef = useRef(null);
-  const preCanvasRef = useRef(null);
   const subCanvasRef = useRef(null);
   const overlayCanvasRef = useRef(null);
 
-  const [postData, setPostData] = useState(null);
-  const [preData, setPreData] = useState(null);
-  const [sub, setSub] = useState(null);
+  // Step 1/2 — DICOM series upload
+  const [postFiles, setPostFiles] = useState([]);
+  const [preFiles, setPreFiles] = useState([]);
+  const [postSessionId, setPostSessionId] = useState(null);
+  const [preSessionId, setPreSessionId] = useState(null);
+  const [postUploading, setPostUploading] = useState(false);
+  const [preUploading, setPreUploading] = useState(false);
+  const [postUploadError, setPostUploadError] = useState(null);
+  const [preUploadError, setPreUploadError] = useState(null);
+
+  // Step 3 — subtraction, slice selection, ROI
+  const [subtractedSeries, setSubtractedSeries] = useState(null);
+  const [subtractLoading, setSubtractLoading] = useState(false);
+  const [subtractError, setSubtractError] = useState(null);
+  const [selectedSlice, setSelectedSlice] = useState(null);
   const [polygon, setPolygon] = useState([]);
   const [drawing, setDrawing] = useState(false);
+  const [extractLoading, setExtractLoading] = useState(false);
+  const [extractError, setExtractError] = useState(null);
+
   const [features, setFeatures] = useState(null);
 
   useEffect(() => {
@@ -633,35 +426,62 @@ export default function App() {
     return () => document.head.removeChild(link);
   }, []);
 
-  const handlePostFile = async (file) => {
-    const data = await loadImageToCanvas(file, postCanvasRef.current);
-    setPostData(data);
-  };
-  const handlePreFile = async (file) => {
-    const data = await loadImageToCanvas(file, preCanvasRef.current);
-    setPreData(data);
-  };
-
-  useEffect(() => {
-    if (step === 3 && postData && preData && !sub) {
-      const w = Math.min(postData.width, preData.width);
-      const h = Math.min(postData.height, preData.height);
-      const result = subtractImages(
-        { data: postData.data, width: w, height: h },
-        { data: preData.data, width: w, height: h }
-      );
-      setSub(result);
+  const handlePostContinue = async () => {
+    if (postFiles.length === 0) return;
+    setPostUploading(true);
+    setPostUploadError(null);
+    try {
+      const resp = await uploadDicomSeries(apiBase, "post-contrast", postFiles);
+      setPostSessionId(resp.session_id);
+      setStep(2);
+    } catch (e) {
+      setPostUploadError(e.message || "Upload failed. Check that the API is running.");
+    } finally {
+      setPostUploading(false);
     }
-  }, [step, postData, preData, sub]);
+  };
 
+  const handlePreContinue = async () => {
+    if (preFiles.length === 0) return;
+    setPreUploading(true);
+    setPreUploadError(null);
+    try {
+      const resp = await uploadDicomSeries(apiBase, "pre-contrast", preFiles);
+      setPreSessionId(resp.session_id);
+      setStep(3);
+    } catch (e) {
+      setPreUploadError(e.message || "Upload failed. Check that the API is running.");
+    } finally {
+      setPreUploading(false);
+    }
+  };
+
+  // Trigger subtraction once both sessions exist and we've reached step 3.
   useEffect(() => {
-    if (!sub || !subCanvasRef.current || !overlayCanvasRef.current) return;
-    const c = subCanvasRef.current;
-    c.width = sub.width; c.height = sub.height;
-    c.getContext("2d").putImageData(sub.display, 0, 0);
+    if (step === 3 && postSessionId && preSessionId && !subtractedSeries && !subtractLoading && !subtractError) {
+      setSubtractLoading(true);
+      subtractDicomSeries(apiBase, postSessionId, preSessionId)
+        .then((resp) => setSubtractedSeries(resp.subtracted_series))
+        .catch((e) => setSubtractError(e.message || "Subtraction failed. Check that both series uploaded correctly."))
+        .finally(() => setSubtractLoading(false));
+    }
+  }, [step, postSessionId, preSessionId, subtractedSeries, subtractLoading, subtractError, apiBase]);
 
+  // Load the selected slice's PNG into the drawing canvas.
+  useEffect(() => {
+    if (!selectedSlice || !subCanvasRef.current) return;
+    loadDataUrlToCanvas(selectedSlice.image_data_b64, subCanvasRef.current).then(() => {
+      if (overlayCanvasRef.current) {
+        overlayCanvasRef.current.width = subCanvasRef.current.width;
+        overlayCanvasRef.current.height = subCanvasRef.current.height;
+      }
+    });
+  }, [selectedSlice]);
+
+  // Redraw the ROI overlay whenever the polygon changes.
+  useEffect(() => {
+    if (!selectedSlice || !overlayCanvasRef.current) return;
     const o = overlayCanvasRef.current;
-    o.width = sub.width; o.height = sub.height;
     const octx = o.getContext("2d");
     octx.clearRect(0, 0, o.width, o.height);
     if (polygon.length > 0) {
@@ -675,7 +495,7 @@ export default function App() {
       octx.stroke();
       if (!drawing) octx.fill();
     }
-  }, [sub, polygon, drawing]);
+  }, [selectedSlice, polygon, drawing]);
 
   const handleCanvasMouseDown = (e) => {
     const rect = overlayCanvasRef.current.getBoundingClientRect();
@@ -697,15 +517,33 @@ export default function App() {
   };
   const handleCanvasMouseUp = () => setDrawing(false);
 
-  const clearROI = () => { setPolygon([]); setFeatures(null); };
+  const handleSelectSlice = (slice) => {
+    setSelectedSlice(slice);
+    setPolygon([]);
+    setExtractError(null);
+  };
+  const handleChangeSlice = () => {
+    setSelectedSlice(null);
+    setPolygon([]);
+    setExtractError(null);
+  };
+
+  const clearROI = () => { setPolygon([]); setExtractError(null); };
   const undoROI = () => { setPolygon([]); };
 
-  const finalizeROIAndExtract = () => {
-    if (!sub || polygon.length < 3) return;
-    const mask = rasterizeMask(polygon, sub.width, sub.height);
-    const f = extractAllFeatures(sub.raw, mask, sub.width, sub.height);
-    setFeatures(f);
-    setStep(4);
+  const finalizeROIAndExtract = async () => {
+    if (!selectedSlice || polygon.length < 3) return;
+    setExtractLoading(true);
+    setExtractError(null);
+    try {
+      const resp = await extractFeaturesFromSlice(apiBase, postSessionId, preSessionId, selectedSlice.index, polygon);
+      setFeatures(resp.features);
+      setStep(4);
+    } catch (e) {
+      setExtractError(e.message || "Feature extraction failed. Check that the API is running and the ROI is valid.");
+    } finally {
+      setExtractLoading(false);
+    }
   };
 
   const checkApiHealth = async () => {
@@ -728,12 +566,26 @@ export default function App() {
     } catch (e) {
       setPredictError(
         e.message ||
-          "Could not reach the inference API. Make sure hcc_inference_api.py is running " +
-            "(uvicorn hcc_inference_api:app --port 8000) and the API base URL above is correct."
+          "Could not reach the inference API. Make sure the backend is running " +
+            "(python run.py) and the API base URL above is correct."
       );
     } finally {
       setPredictLoading(false);
     }
+  };
+
+  const startNewCase = () => {
+    deleteSessionBestEffort(apiBase, postSessionId);
+    deleteSessionBestEffort(apiBase, preSessionId);
+    setStep(1);
+    setPostFiles([]); setPreFiles([]);
+    setPostSessionId(null); setPreSessionId(null);
+    setPostUploadError(null); setPreUploadError(null);
+    setSubtractedSeries(null); setSubtractError(null);
+    setSelectedSlice(null); setPolygon([]);
+    setExtractError(null);
+    setFeatures(null);
+    setResult(null); setPredictError(null);
   };
 
   const grouped = { morph: [], first: [], glcm: [] };
@@ -749,7 +601,7 @@ export default function App() {
             </div>
             <div>
               <div className="text-white text-sm font-semibold tracking-wide">HCC RADIOMICS &middot; DECISION SUPPORT</div>
-              <div className="text-[11px]" style={{ color: "#9AA7B8", fontFamily: "'IBM Plex Mono', monospace" }}>RESEARCH PROTOTYPE &middot; v0.2</div>
+              <div className="text-[11px]" style={{ color: "#9AA7B8", fontFamily: "'IBM Plex Mono', monospace" }}>RESEARCH PROTOTYPE &middot; v0.3</div>
             </div>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
@@ -768,25 +620,27 @@ export default function App() {
 
       <div className="max-w-6xl mx-auto p-6">
         {step === 1 && (
-          <UploadStep
-            title="Step 1 — Select post-contrast image"
-            subtitle="Upload the post-contrast phase slice for this patient."
-            onFile={handlePostFile}
-            previewCanvasRef={postCanvasRef}
-            loaded={!!postData}
-            onNext={() => setStep(2)}
+          <SeriesUploadStep
+            title="Step 1 — Upload post-contrast DICOM series"
+            subtitle="Select every .dcm file in the post-contrast phase folder for this patient."
+            files={postFiles}
+            onFilesChange={setPostFiles}
+            onContinue={handlePostContinue}
+            uploading={postUploading}
+            error={postUploadError}
             canGoBack={false}
           />
         )}
 
         {step === 2 && (
-          <UploadStep
-            title="Step 2 — Select pre-contrast image"
-            subtitle="Upload the matching pre-contrast phase slice (same patient, same slice position)."
-            onFile={handlePreFile}
-            previewCanvasRef={preCanvasRef}
-            loaded={!!preData}
-            onNext={() => setStep(3)}
+          <SeriesUploadStep
+            title="Step 2 — Upload pre-contrast DICOM series"
+            subtitle="Select every .dcm file in the matching pre-contrast phase folder (same patient, same slice positions)."
+            files={preFiles}
+            onFilesChange={setPreFiles}
+            onContinue={handlePreContinue}
+            uploading={preUploading}
+            error={preUploadError}
             canGoBack={true}
             onBack={() => setStep(1)}
           />
@@ -794,16 +648,39 @@ export default function App() {
 
         {step === 3 && (
           <div className="rounded-lg p-6 border" style={{ background: COLORS.panel, borderColor: COLORS.hairline }}>
-            <SectionHeader eyebrow="Step 3" title="Subtracted image — draw tumor ROI" />
-            {!sub ? (
-              <div className="text-sm" style={{ color: COLORS.inkSoft }}>Computing subtraction (post &minus; pre)&hellip;</div>
-            ) : (
+            <SectionHeader eyebrow="Step 3" title="Subtracted series — select slice & draw tumor ROI" />
+
+            {subtractLoading && (
+              <div className="text-sm flex items-center gap-2" style={{ color: COLORS.inkSoft }}>
+                <Loader2 size={14} className="animate-spin" /> Aligning series and computing subtraction (post &minus; pre)&hellip;
+              </div>
+            )}
+
+            {subtractError && !subtractLoading && (
+              <div className="text-xs px-3 py-2 rounded flex gap-2 items-start" style={{ background: "#FBEAE8", color: "#7A2A21" }}>
+                <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+                <div>
+                  {subtractError}
+                  <button onClick={() => setSubtractError(null)} className="ml-3 underline">Retry</button>
+                </div>
+              </div>
+            )}
+
+            {!subtractLoading && subtractedSeries && !selectedSlice && (
+              <>
+                <SliceGallery slices={subtractedSeries} onSelect={handleSelectSlice} />
+                <div className="text-center mt-4">
+                  <button onClick={() => setStep(2)} className="text-xs" style={{ color: COLORS.inkSoft }}>&larr; Back to pre-contrast upload</button>
+                </div>
+              </>
+            )}
+
+            {!subtractLoading && subtractedSeries && selectedSlice && (
               <>
                 <div className="text-xs mb-3 px-3 py-2 rounded flex gap-2 items-start" style={{ background: COLORS.tealSoft, color: COLORS.teal }}>
                   <Info size={14} className="shrink-0 mt-0.5" />
                   Click and drag to draw a smooth freehand outline around the
-                  tumor on the subtracted (enhancement) image below. Release
-                  to close the outline.
+                  tumor on slice #{selectedSlice.index}. Release to close the outline.
                 </div>
                 <div style={{ display: "block", textAlign: "center" }}>
                   <div className="relative inline-block">
@@ -819,6 +696,13 @@ export default function App() {
                     />
                   </div>
                 </div>
+
+                {extractError && (
+                  <div className="text-xs mt-3 px-3 py-2 rounded flex gap-2 items-start" style={{ background: "#FBEAE8", color: "#7A2A21" }}>
+                    <AlertTriangle size={13} className="shrink-0 mt-0.5" /> {extractError}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-center gap-3 mt-4">
                   <button onClick={undoROI} className="px-3 py-1.5 rounded-md text-xs border flex items-center gap-1" style={{ borderColor: COLORS.hairline, color: COLORS.inkSoft }}>
                     <Undo2 size={13} /> Redraw
@@ -828,15 +712,16 @@ export default function App() {
                   </button>
                   <button
                     onClick={finalizeROIAndExtract}
-                    disabled={polygon.length < 3}
+                    disabled={polygon.length < 3 || extractLoading}
                     className="px-4 py-1.5 rounded-md text-xs font-medium text-white flex items-center gap-1 disabled:opacity-40"
                     style={{ background: COLORS.teal }}
                   >
-                    Extract features from ROI <ArrowRight size={13} />
+                    {extractLoading ? (<><Loader2 size={13} className="animate-spin" /> Extracting&hellip;</>) : (<>Extract features from ROI <ArrowRight size={13} /></>)}
                   </button>
                 </div>
-                <div className="text-center mt-3">
-                  <button onClick={() => setStep(2)} className="text-xs" style={{ color: COLORS.inkSoft }}>&larr; Back</button>
+                <div className="text-center mt-3 flex justify-center gap-4">
+                  <button onClick={handleChangeSlice} className="text-xs" style={{ color: COLORS.inkSoft }}>&larr; Change slice</button>
+                  <button onClick={() => setStep(2)} className="text-xs" style={{ color: COLORS.inkSoft }}>&larr; Back to pre-contrast upload</button>
                 </div>
               </>
             )}
@@ -848,12 +733,12 @@ export default function App() {
             <SectionHeader eyebrow="Step 4" title="Features extracted from your drawn ROI" />
             <div className="text-xs mb-4 px-3 py-2 rounded flex gap-2 items-start" style={{ background: COLORS.tealSoft, color: COLORS.teal }}>
               <Info size={14} className="shrink-0 mt-0.5" />
-              These 25 values were computed directly from the pixels inside
-              the ROI you drew on the subtracted image (genuine calculation —
-              not a placeholder). <b className="mx-1">TOP</b> marks the 12
-              SHAP-selected features. Liver-context features (*) use the rest
-              of the image, excluding background, as a proxy for whole-liver
-              context.
+              These 25 values were computed server-side directly from the pixels
+              inside the ROI you drew on the subtracted image (genuine
+              calculation — not a placeholder). <b className="mx-1">TOP</b> marks
+              the 12 SHAP-selected features. Liver-context features (*) use the
+              rest of the image, excluding background, as a proxy for
+              whole-liver context.
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {Object.entries(GROUP_LABELS).map(([gk, gl]) => (
@@ -940,15 +825,16 @@ export default function App() {
               <code> {stagingModel === "XGBoost" ? "best_model_XGBoost.joblib" : `model_${stagingModel}.joblib`}</code>).
               Necrotic prediction: your uploaded
               <code> best_necrotic_vs_others_model_RandomForest.joblib</code>.
-              Both ran via the local inference API — feature extraction,
-              scaling, and classification above are all genuine, using the
-              actual models from your study. Evidence values are real SHAP
-              contributions computed server-side with <code>shap.TreeExplainer</code>.
+              Both ran via the local inference API — DICOM parsing, series
+              subtraction, ROI feature extraction, scaling, and classification
+              above are all genuine, using the actual models from your study.
+              Evidence values are real SHAP contributions computed server-side
+              with <code>shap.TreeExplainer</code>.
             </div>
             <div className="flex justify-between">
               <button onClick={() => setStep(4)} className="text-xs" style={{ color: COLORS.inkSoft }}>&larr; Back to features</button>
               <button
-                onClick={() => { setStep(1); setPostData(null); setPreData(null); setSub(null); setPolygon([]); setFeatures(null); setResult(null); setPredictError(null); }}
+                onClick={startNewCase}
                 className="flex items-center gap-1 text-xs px-3 py-1.5 rounded border"
                 style={{ borderColor: COLORS.hairline, color: COLORS.inkSoft }}
               >
@@ -962,12 +848,12 @@ export default function App() {
       <div className="w-full px-6 py-3 flex items-center gap-3 border-t" style={{ background: "#FBEAE8", borderColor: "#E8C4BE" }}>
         <AlertTriangle size={18} color={COLORS.advanced} className="shrink-0" />
         <div className="text-xs" style={{ color: "#7A2A21" }}>
-          <b>Research prototype — not a diagnostic device.</b> Feature
-          extraction and predictions now use your real trained models via
-          the local inference API, but this pipeline has not undergone
-          clinical/regulatory validation (external cohort testing, prospective
-          evaluation, calibration review). All outputs must be confirmed by
-          a qualified radiologist before any clinical use.
+          <b>Research prototype — not a diagnostic device.</b> DICOM parsing,
+          series subtraction, feature extraction and predictions now use your
+          real trained models via the local inference API, but this pipeline
+          has not undergone clinical/regulatory validation (external cohort
+          testing, prospective evaluation, calibration review). All outputs
+          must be confirmed by a qualified radiologist before any clinical use.
         </div>
         <FileWarning size={16} color={COLORS.advanced} className="ml-auto shrink-0 opacity-60" />
       </div>

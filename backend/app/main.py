@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from app.middleware.cors import add_cors
 from app.models.loader import ModelRegistry
-from app.routes import health, predict
+from app.routes import health, predict, series
 from app.utils.errors import InvalidFeaturePayload, invalid_feature_payload_handler, unhandled_exception_handler
 from app.utils.logger import setup_logging
 
@@ -38,3 +38,4 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.include_router(health.router)
 app.include_router(predict.router)
+app.include_router(series.router)

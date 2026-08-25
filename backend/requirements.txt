@@ -14,3 +14,7 @@ shap==0.52.0
 joblib==1.5.3
 numpy
 pandas
+
+# DICOM handling and image processing
+pydicom==2.4.4
+Pillow==10.1.0
