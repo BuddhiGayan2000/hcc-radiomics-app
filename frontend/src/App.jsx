@@ -246,8 +246,9 @@ function SeriesUploadStep({ title, subtitle, files, onFilesChange, onContinue, u
       <div className="text-[11px] mt-5 px-3 py-2 rounded flex gap-2 items-start text-left" style={{ background: "#FBFAF7", color: COLORS.inkSoft }}>
         <Info size={13} className="shrink-0 mt-0.5" />
         Select every .dcm file in this phase&rsquo;s series folder (use Ctrl/Cmd+A
-        in the file picker). Slices are matched between phases by filename, so
-        both series must use the same naming pattern (e.g. 1-01.dcm, 1-02.dcm&hellip;).
+        in the file picker). Filenames don&rsquo;t need to match anything &mdash;
+        slices are ordered and matched between phases using each file&rsquo;s own
+        DICOM position metadata.
       </div>
 
       {canGoBack && (

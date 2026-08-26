@@ -4,6 +4,16 @@
 **Date:** 2026-08-23  
 **Tests:** 4/4 Passed | Real Data Verification: Ready
 
+> **Update (2026-08-26):** This doc describes the original filename-based
+> alignment (matching "1-01.dcm" ↔ "1-01.dcm"). That assumption didn't hold
+> for real-world DICOM exports, which use every naming convention imaginable.
+> Alignment is now based on each slice's own DICOM position metadata
+> (`SliceLocation` / `ImagePositionPatient`, with `InstanceNumber` and
+> filename as fallbacks) — see `_align_slices_by_position` in
+> `app/routes/series.py` and `assign_slice_indices` in
+> `app/models/dicom_handler.py`. The request/response shapes below are
+> unchanged.
+
 ---
 
 ## What Was Implemented

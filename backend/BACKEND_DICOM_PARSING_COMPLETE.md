@@ -4,6 +4,15 @@
 **Date:** 2026-08-23  
 **Tests:** 22/22 Passed | Real Data Verification: Passed
 
+> **Update (2026-08-26):** `extract_slice_index` and `align_series`
+> (filename-regex based) described below have been removed — real DICOM
+> exports use every naming convention imaginable, not just "1-XX.dcm".
+> Ordering and cross-series alignment now use `slice_sort_key` /
+> `assign_slice_indices` / `best_slice_position` in this same module, based
+> on each slice's own `SliceLocation` / `ImagePositionPatient` /
+> `InstanceNumber` metadata. Everything else below (windowing, subtraction,
+> PNG encoding) is unchanged.
+
 ---
 
 ## What Was Implemented

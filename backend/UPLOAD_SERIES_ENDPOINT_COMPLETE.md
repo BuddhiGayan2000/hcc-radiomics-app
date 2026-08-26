@@ -4,6 +4,15 @@
 **Date:** 2026-08-23  
 **Tests:** 9/9 Passed | Real Data Verification: Ready
 
+> **Update (2026-08-26):** This doc describes the original implementation,
+> which required filenames matching "1-XX.dcm" and rejected anything else.
+> That's not a real DICOM naming convention, so uploads are no longer
+> filtered by filename at all — every slice is ordered using its own DICOM
+> position metadata instead (see `assign_slice_indices` in
+> `app/models/dicom_handler.py`). A file is only rejected if its DICOM
+> content itself can't be parsed. The request/response shapes below are
+> unchanged.
+
 ---
 
 ## What Was Implemented

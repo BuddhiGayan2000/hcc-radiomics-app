@@ -4,14 +4,16 @@ DICOM parsing and series alignment for HCC radiomics.
 Handles:
 - Reading DICOM files with pydicom
 - Windowing/leveling for display (liver CT: window=400, level=50)
-- Aligning pre/post-contrast series by filename
+- Ordering slices within a series and aligning pre/post-contrast series by
+  their own DICOM position metadata (never by filename — see
+  slice_sort_key/best_slice_position; real-world DICOM exports use every
+  naming convention imaginable, e.g. "1-01.dcm", "1-012.dcm", "IMG1000012.dcm")
 - Computing subtracted images (Post - Pre)
 - Encoding images as base64 PNG for transmission to frontend
 """
 
 import base64
 import io
-import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -27,11 +29,6 @@ LIVER_WINDOW_CENTER = 50
 
 class DICOMParseError(Exception):
     """Raised when DICOM file cannot be parsed."""
-    pass
-
-
-class SeriesAlignmentError(Exception):
-    """Raised when pre/post series cannot be aligned."""
     pass
 
 
@@ -73,18 +70,82 @@ def parse_dicom_file(file_path: str) -> Tuple[np.ndarray, Dict]:
         "max_intensity": float(pixel_array.max()),
     }
 
-    # Try to extract slice position and other DICOM metadata
+    # Try to extract slice position and other DICOM metadata. These (not
+    # filenames) are what ordering and cross-series alignment are based on.
     try:
         if hasattr(dcm, "SliceLocation"):
             metadata["slice_location"] = float(dcm.SliceLocation)
+        if hasattr(dcm, "ImagePositionPatient") and len(dcm.ImagePositionPatient) == 3:
+            metadata["image_position_z"] = float(dcm.ImagePositionPatient[2])
         if hasattr(dcm, "InstanceNumber"):
             metadata["instance_number"] = int(dcm.InstanceNumber)
         if hasattr(dcm, "PatientID"):
             metadata["patient_id"] = str(dcm.PatientID)
+        if hasattr(dcm, "SeriesInstanceUID"):
+            metadata["series_instance_uid"] = str(dcm.SeriesInstanceUID)
     except Exception:
         pass  # Not all DICOM files have this metadata
 
     return pixel_array, metadata
+
+
+def slice_sort_key(metadata: Dict) -> Tuple[int, object]:
+    """
+    Best-effort ordering key for a slice within one uploaded series,
+    independent of filename.
+
+    Preference order: physical slice position (SliceLocation, then the z
+    component of ImagePositionPatient) > InstanceNumber > filename. The
+    leading int groups slices by which criterion was available, so a
+    tuple's second element is only ever compared against another value of
+    the same type (float position, int instance number, or str filename).
+    """
+    if "slice_location" in metadata:
+        return (0, metadata["slice_location"])
+    if "image_position_z" in metadata:
+        return (0, metadata["image_position_z"])
+    if "instance_number" in metadata:
+        return (1, metadata["instance_number"])
+    return (2, metadata["filename"])
+
+
+def assign_slice_indices(metadata_list: List[Dict]) -> List[str]:
+    """
+    Assign a stable, zero-padded slice index ("01", "02", ...) to each file
+    in an uploaded series, ordered by slice_sort_key rather than filename.
+
+    Args:
+        metadata_list: parsed metadata dicts in original upload order (each
+            must include "filename"; see parse_dicom_file)
+
+    Returns:
+        Index strings parallel to metadata_list — metadata_list[i] is
+        assigned indices[i].
+    """
+    n = len(metadata_list)
+    width = max(2, len(str(n)))
+    order = sorted(range(n), key=lambda i: slice_sort_key(metadata_list[i]))
+
+    indices: List[Optional[str]] = [None] * n
+    for rank, original_i in enumerate(order):
+        indices[original_i] = str(rank + 1).zfill(width)
+    return indices
+
+
+def best_slice_position(metadata: Dict) -> Optional[float]:
+    """
+    Best-available physical position (mm) for a slice, used to line up the
+    same anatomical location across two different series (e.g. matching a
+    post-contrast slice to its pre-contrast counterpart). Prefers
+    SliceLocation; falls back to the z component of ImagePositionPatient.
+    Returns None if neither tag is present (some anonymized/stripped DICOM
+    omit both).
+    """
+    if "slice_location" in metadata:
+        return metadata["slice_location"]
+    if "image_position_z" in metadata:
+        return metadata["image_position_z"]
+    return None
 
 
 def apply_windowing(
@@ -113,75 +174,6 @@ def apply_windowing(
     windowed = ((windowed - min_val) / (max_val - min_val) * 255).astype(np.uint8)
 
     return windowed
-
-
-def extract_slice_index(filename: str) -> Optional[str]:
-    """
-    Extract slice index from DICOM filename.
-
-    Expected format: "1-XX.dcm" where XX is the slice number (01, 02, ..., 20)
-    Returns the XX part for matching.
-
-    Args:
-        filename: DICOM filename (e.g., "1-05.dcm")
-
-    Returns:
-        Slice index string (e.g., "05") or None if pattern doesn't match
-    """
-    match = re.match(r"1-(\d{2})\.dcm", filename, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    return None
-
-
-def align_series(
-    post_files: List[str],
-    pre_files: List[str],
-) -> List[Tuple[str, str, str]]:
-    """
-    Align pre-contrast and post-contrast DICOM series by filename.
-
-    Matches files with the same slice index (e.g., 1-05.dcm).
-
-    Args:
-        post_files: List of paths to post-contrast DICOM files
-        pre_files: List of paths to pre-contrast DICOM files
-
-    Returns:
-        List of (post_path, pre_path, slice_index) tuples for matched pairs
-
-    Raises:
-        SeriesAlignmentError: If series cannot be aligned
-    """
-    # Build index maps
-    post_map = {}
-    for f in post_files:
-        idx = extract_slice_index(Path(f).name)
-        if idx:
-            post_map[idx] = f
-
-    pre_map = {}
-    for f in pre_files:
-        idx = extract_slice_index(Path(f).name)
-        if idx:
-            pre_map[idx] = f
-
-    # Find common indices
-    common_indices = set(post_map.keys()) & set(pre_map.keys())
-
-    if not common_indices:
-        raise SeriesAlignmentError(
-            f"No matching slices found. Post-contrast indices: {sorted(post_map.keys())}, "
-            f"Pre-contrast indices: {sorted(pre_map.keys())}"
-        )
-
-    # Return sorted by index
-    pairs = [
-        (post_map[idx], pre_map[idx], idx)
-        for idx in sorted(common_indices)
-    ]
-
-    return pairs
 
 
 def subtract_images(
@@ -261,66 +253,3 @@ def array_to_png_base64(array: np.ndarray) -> str:
     b64_str = base64.b64encode(png_bytes).decode("utf-8")
 
     return f"data:image/png;base64,{b64_str}"
-
-
-def process_dicom_series(
-    post_files: List[str],
-    pre_files: List[str],
-) -> List[Dict]:
-    """
-    Full pipeline: Load, align, and subtract a DICOM series.
-
-    Args:
-        post_files: List of post-contrast DICOM file paths
-        pre_files: List of pre-contrast DICOM file paths
-
-    Returns:
-        List of dicts with keys:
-        - 'index': Slice index (01, 02, ..., 20)
-        - 'post_filename': Post-contrast filename
-        - 'pre_filename': Pre-contrast filename
-        - 'width': Image width
-        - 'height': Image height
-        - 'subtracted_image_b64': Base64-encoded PNG of subtracted image
-        - 'raw_subtracted_array': Raw subtracted numpy array (for feature extraction)
-
-    Raises:
-        DICOMParseError: If any file cannot be parsed
-        SeriesAlignmentError: If series cannot be aligned
-    """
-    # Align series
-    pairs = align_series(post_files, pre_files)
-
-    results = []
-    for post_path, pre_path, slice_idx in pairs:
-        # Parse both files
-        post_array, post_meta = parse_dicom_file(post_path)
-        pre_array, pre_meta = parse_dicom_file(pre_path)
-
-        # Apply windowing for display
-        post_windowed = apply_windowing(post_array)
-        pre_windowed = apply_windowing(pre_array)
-
-        # Compute subtraction (on windowed data for visual consistency)
-        subtracted_windowed = subtract_images(post_windowed, pre_windowed)
-
-        # Also compute on raw data for feature extraction
-        subtracted_raw = subtract_images(post_array, pre_array)
-
-        # Normalize and encode for transmission
-        subtracted_display = normalize_for_display(subtracted_windowed)
-        b64_png = array_to_png_base64(subtracted_display)
-
-        result = {
-            "index": slice_idx,
-            "post_filename": Path(post_path).name,
-            "pre_filename": Path(pre_path).name,
-            "width": post_meta["width"],
-            "height": post_meta["height"],
-            "subtracted_image_b64": b64_png,
-            "raw_subtracted_array": subtracted_raw,  # For feature extraction later
-        }
-
-        results.append(result)
-
-    return results

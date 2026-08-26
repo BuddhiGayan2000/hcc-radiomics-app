@@ -9,15 +9,15 @@ Endpoints:
 
 import logging
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 
 from app.models.dicom_handler import (
     parse_dicom_file,
     DICOMParseError,
-    SeriesAlignmentError,
-    align_series,
+    assign_slice_indices,
+    best_slice_position,
     subtract_images,
     array_to_png_base64,
     apply_windowing,
@@ -40,6 +40,55 @@ router = APIRouter(prefix="/series", tags=["series"])
 
 # Get session store
 session_store = get_session_store()
+
+# Max physical distance (mm) between a post-contrast slice and a pre-contrast
+# slice for them to be considered the same anatomical location.
+ALIGNMENT_TOLERANCE_MM = 5.0
+
+
+def _align_slices_by_position(
+    post_slices: List[SeriesSlice],
+    pre_slices: List[SeriesSlice],
+    tolerance_mm: float = ALIGNMENT_TOLERANCE_MM,
+) -> Tuple[List[Tuple[SeriesSlice, SeriesSlice]], str]:
+    """
+    Pair each post-contrast slice with its closest pre-contrast counterpart.
+
+    Matches by physical slice position (SliceLocation, or the z component of
+    ImagePositionPatient) within tolerance_mm — the only correspondence
+    that's true regardless of filename or either series' slice count. Falls
+    back to ordinal pairing (i-th post to i-th pre, using each series' own
+    DICOM-derived order — see assign_slice_indices) only when position
+    metadata is missing from every slice in either series.
+
+    Returns:
+        (pairs, method) where method is "position" or "ordinal".
+    """
+    post_positions = [(s, best_slice_position(s.metadata)) for s in post_slices]
+    pre_positions = [(s, best_slice_position(s.metadata)) for s in pre_slices]
+
+    have_positions = all(p is not None for _, p in post_positions) and all(
+        p is not None for _, p in pre_positions
+    )
+
+    if not have_positions:
+        return list(zip(post_slices, pre_slices)), "ordinal"
+
+    pairs = []
+    used_pre_indices = set()
+    for post_slice, post_pos in post_positions:
+        best_pre, best_dist = None, None
+        for pre_slice, pre_pos in pre_positions:
+            if pre_slice.index in used_pre_indices:
+                continue
+            dist = abs(post_pos - pre_pos)
+            if best_dist is None or dist < best_dist:
+                best_pre, best_dist = pre_slice, dist
+        if best_pre is not None and best_dist <= tolerance_mm:
+            pairs.append((post_slice, best_pre))
+            used_pre_indices.add(best_pre.index)
+
+    return pairs, "position"
 
 
 @router.post(
@@ -94,18 +143,19 @@ async def upload_series(
     session_id = session_store.create_session(phase)
     session = session_store.get_session(session_id)
 
-    # Parse each file
-    parsed_count = 0
+    # Pass 1: parse every file. Filenames are never inspected here — real
+    # DICOM exports use every naming convention imaginable ("1-01.dcm",
+    # "1-012.dcm", "IMG1000012.dcm", ...), so a file is only rejected if its
+    # DICOM content itself can't be read.
+    import os
+    import tempfile
+
+    parsed: List[Tuple[np.ndarray, dict]] = []
     errors = []
 
     for file in files:
         try:
-            # Read file content into memory
             content = await file.read()
-
-            # Save to temp location (in-memory would require BytesIO)
-            import tempfile
-            import os
 
             with tempfile.NamedTemporaryFile(
                 suffix=".dcm", delete=False, prefix="dicom_"
@@ -114,37 +164,10 @@ async def upload_series(
                 tmp_path = tmp.name
 
             try:
-                # Parse DICOM
                 pixel_array, metadata = parse_dicom_file(tmp_path)
-
-                # Extract slice index from filename
-                from app.models.dicom_handler import extract_slice_index
-
-                slice_idx = extract_slice_index(file.filename)
-                if not slice_idx:
-                    logger.warning(f"Skipping {file.filename}: invalid filename format")
-                    errors.append(f"{file.filename}: invalid filename format")
-                    continue
-
-                # Create slice object
-                slice_obj = SeriesSlice(
-                    index=slice_idx,
-                    filename=file.filename,
-                    pixel_array=pixel_array,
-                    width=metadata["width"],
-                    height=metadata["height"],
-                    min_intensity=metadata["min_intensity"],
-                    max_intensity=metadata["max_intensity"],
-                    metadata=metadata,
-                )
-
-                # Add to session
-                session.add_slice(slice_obj)
-                parsed_count += 1
-                logger.debug(f"Parsed {file.filename} as slice {slice_idx}")
-
+                metadata["filename"] = file.filename  # preserve the original name, not the temp path's
+                parsed.append((pixel_array, metadata))
             finally:
-                # Clean up temp file
                 os.unlink(tmp_path)
 
         except DICOMParseError as e:
@@ -154,9 +177,7 @@ async def upload_series(
             logger.error(f"Error processing {file.filename}: {e}")
             errors.append(f"{file.filename}: {str(e)}")
 
-    # Check if any files were successfully parsed
-    if parsed_count == 0:
-        # Delete session since it's empty
+    if not parsed:
         session_store.delete_session(session_id)
         error_msg = "; ".join(errors) if errors else "Could not parse any DICOM files"
         raise HTTPException(
@@ -164,9 +185,36 @@ async def upload_series(
             detail=f"Failed to parse any DICOM files. {error_msg}",
         )
 
-    # Log warnings if some files failed
     if errors:
         logger.warning(f"Upload partially succeeded: {len(errors)} files failed to parse")
+
+    # Pass 2: order slices using each file's own DICOM position metadata
+    # (SliceLocation / ImagePositionPatient > InstanceNumber > filename as a
+    # last resort) rather than any assumed filename pattern.
+    metadata_list = [m for _, m in parsed]
+    indices = assign_slice_indices(metadata_list)
+
+    series_uids = {m["series_instance_uid"] for _, m in parsed if "series_instance_uid" in m}
+    if len(series_uids) > 1:
+        logger.warning(
+            f"Upload for {phase} contains {len(series_uids)} distinct SeriesInstanceUIDs "
+            f"({len(parsed)} files) — this folder may mix multiple series/phases, which can "
+            f"produce a misleading subtraction. Consider uploading a single series only."
+        )
+
+    for (pixel_array, metadata), slice_idx in zip(parsed, indices):
+        session.add_slice(
+            SeriesSlice(
+                index=slice_idx,
+                filename=metadata["filename"],
+                pixel_array=pixel_array,
+                width=metadata["width"],
+                height=metadata["height"],
+                min_intensity=metadata["min_intensity"],
+                max_intensity=metadata["max_intensity"],
+                metadata=metadata,
+            )
+        )
 
     # Build response
     slices = session.get_sorted_slices()
@@ -259,7 +307,8 @@ async def subtract_series(request: SubtractSeriesRequest) -> SubtractSeriesRespo
     """
     Compute subtracted images from pre/post-contrast DICOM series.
 
-    Aligns slices by filename, computes Post - Pre for each pair,
+    Aligns slices by physical position (never by filename — see
+    _align_slices_by_position), computes Post - Pre for each matched pair,
     and returns as base64-encoded PNG images.
 
     Args:
@@ -308,32 +357,33 @@ async def subtract_series(request: SubtractSeriesRequest) -> SubtractSeriesRespo
         f"{pre_session.slice_count()} pre slices"
     )
 
-    # Get sorted slices from both sessions
-    post_slices = {s.index: s for s in post_session.get_sorted_slices()}
-    pre_slices = {s.index: s for s in pre_session.get_sorted_slices()}
+    pairs, alignment_method = _align_slices_by_position(
+        post_session.get_sorted_slices(), pre_session.get_sorted_slices()
+    )
 
-    # Find common slice indices
-    common_indices = sorted(set(post_slices.keys()) & set(pre_slices.keys()))
-
-    if not common_indices:
+    if not pairs:
         raise HTTPException(
             status_code=400,
-            detail=f"No matching slices between post and pre series. "
-                   f"Post indices: {sorted(post_slices.keys())}, "
-                   f"Pre indices: {sorted(pre_slices.keys())}",
+            detail="No matching slices between post and pre series — none of the "
+                   "post-contrast slices had a pre-contrast slice at the same "
+                   f"physical position within {ALIGNMENT_TOLERANCE_MM}mm.",
         )
 
-    logger.info(f"Found {len(common_indices)} matching slices: {common_indices}")
+    if alignment_method == "ordinal":
+        logger.warning(
+            "Neither series has usable slice-position metadata; aligning "
+            "post/pre slices by ordinal position instead — verify the "
+            "resulting slice pairs look anatomically correct."
+        )
+    logger.info(f"Aligned {len(pairs)} slice pairs by {alignment_method}")
 
     # Compute subtraction for each matching pair
     subtracted_slices = []
     errors = []
 
-    for idx in common_indices:
+    for post_slice, pre_slice in pairs:
+        idx = post_slice.index
         try:
-            post_slice = post_slices[idx]
-            pre_slice = pre_slices[idx]
-
             # Ensure same dimensions
             if post_slice.pixel_array.shape != pre_slice.pixel_array.shape:
                 errors.append(

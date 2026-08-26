@@ -319,7 +319,7 @@ if mask_pixel_count == 0:
 
 3. POST /series/subtract
    ├─ Input: post_session_id, pre_session_id
-   ├─ Align slices by filename (1-01.dcm ↔ 1-01.dcm)
+   ├─ Align slices by physical position (SliceLocation/ImagePositionPatient, not filename)
    ├─ Compute Post - Pre for each pair
    ├─ Apply windowing (liver CT: window=400, center=50)
    ├─ Normalize to [0, 255]

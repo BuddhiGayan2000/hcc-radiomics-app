@@ -125,16 +125,72 @@ class TestUploadSeriesEndpoint:
             assert data["phase"] == "post-contrast"
             assert data["slice_count"] == 5
 
-            # Check slice info
+            # Check slice info. Slices come back ordered by each file's own
+            # DICOM position metadata (see assign_slice_indices), which is
+            # not guaranteed to match filename sort order — so look each
+            # one up by filename rather than assuming a zip-with-sorted order.
             assert len(data["slices"]) == 5
-            for slice_info, dcm_file in zip(data["slices"], sorted(test_files)):
-                assert slice_info["filename"] == dcm_file.name
+            expected_filenames = {f.name for f in test_files}
+            returned_filenames = {s["filename"] for s in data["slices"]}
+            assert returned_filenames == expected_filenames
+
+            indices = [s["index"] for s in data["slices"]]
+            assert len(set(indices)) == 5  # every slice gets a distinct index
+            for slice_info in data["slices"]:
                 assert slice_info["width"] == 512
                 assert slice_info["height"] == 512
                 assert slice_info["index"].isdigit()
 
         finally:
             # Close file handles
+            for _, (_, f) in files:
+                f.close()
+
+    @pytest.mark.skipif(
+        Path(
+            "HCC 010 final/DATA HCC 010/HCC 010/05-03-1998-NA-ABDPEL LIVER-46678/2.000000-PRE LIVER-34910"
+        ).exists()
+        is False,
+        reason="HCC_010 test data not found",
+    )
+    def test_upload_accepts_arbitrary_filenames(self, hcc_010_dicom_files):
+        """Real DICOM exports use every naming convention imaginable — the
+        upload endpoint must never reject files based on filename, and must
+        still order slices correctly using their own DICOM position metadata.
+        """
+        if not hcc_010_dicom_files:
+            pytest.skip("HCC_010 data not available")
+
+        test_files = hcc_010_dicom_files[:3]
+        arbitrary_names = ["IMG1000012.dcm", "scan_a.dcm", "1-012.dcm"]
+
+        files = [
+            ("files", (arbitrary_names[i], open(dcm_path, "rb")))
+            for i, dcm_path in enumerate(test_files)
+        ]
+
+        try:
+            response = client.post(
+                "/series/upload",
+                data={"phase": "post-contrast"},
+                files=files,
+            )
+
+            assert response.status_code == 200
+
+            data = response.json()
+            assert data["slice_count"] == 3
+            uploaded_names = {s["filename"] for s in data["slices"]}
+            assert uploaded_names == set(arbitrary_names)
+
+            # Indices must still be assigned and unique, independent of name
+            indices = [s["index"] for s in data["slices"]]
+            assert len(set(indices)) == 3
+            for idx in indices:
+                assert idx.isdigit()
+
+            session_store.delete_session(data["session_id"])
+        finally:
             for _, (_, f) in files:
                 f.close()
 

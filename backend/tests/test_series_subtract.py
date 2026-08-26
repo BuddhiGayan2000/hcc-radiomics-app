@@ -97,14 +97,18 @@ class TestSubtractSeriesEndpoint:
         session_store.delete_session(pre_id)
 
     def test_subtract_no_matching_slices(self):
-        """Should reject if no slices match between series."""
+        """Should reject if no post/pre slices are at the same physical position.
+
+        Alignment is position-based, not filename-based (arbitrary DICOM
+        filenames carry no naming convention), so "no match" now means the
+        slice_location values are farther apart than ALIGNMENT_TOLERANCE_MM.
+        """
         from app.models.session_store import SeriesSlice
         import numpy as np
 
         post_id = session_store.create_session("post-contrast")
         pre_id = session_store.create_session("pre-contrast")
 
-        # Add slices with different indices
         fake_array = np.random.randint(0, 256, (100, 100), dtype=np.uint8).astype(
             np.float32
         )
@@ -115,24 +119,26 @@ class TestSubtractSeriesEndpoint:
         post_session.add_slice(
             SeriesSlice(
                 index="01",
-                filename="1-01.dcm",
+                filename="IMG1000012.dcm",
                 pixel_array=fake_array,
                 width=100,
                 height=100,
                 min_intensity=0,
                 max_intensity=256,
+                metadata={"slice_location": 0.0},
             )
         )
 
         pre_session.add_slice(
             SeriesSlice(
-                index="02",  # Different index
-                filename="1-02.dcm",
+                index="01",
+                filename="1-012.dcm",
                 pixel_array=fake_array,
                 width=100,
                 height=100,
                 min_intensity=0,
                 max_intensity=256,
+                metadata={"slice_location": 500.0},  # far outside tolerance
             )
         )
 
@@ -146,6 +152,65 @@ class TestSubtractSeriesEndpoint:
 
         assert response.status_code == 400
         assert "No matching slices" in response.json()["detail"]
+
+        # Cleanup
+        session_store.delete_session(post_id)
+        session_store.delete_session(pre_id)
+
+    def test_subtract_aligns_by_position_with_mismatched_filenames_and_indices(self):
+        """Slices with unrelated filenames/index labels should still align by physical position."""
+        from app.models.session_store import SeriesSlice
+        import numpy as np
+
+        post_id = session_store.create_session("post-contrast")
+        pre_id = session_store.create_session("pre-contrast")
+
+        fake_array = np.random.randint(0, 256, (100, 100), dtype=np.uint8).astype(
+            np.float32
+        )
+
+        post_session = session_store.get_session(post_id)
+        pre_session = session_store.get_session(pre_id)
+
+        # Same anatomical position, completely different filenames/indices —
+        # this is the real-world case: no shared naming convention at all.
+        post_session.add_slice(
+            SeriesSlice(
+                index="01",
+                filename="IMG1000012.dcm",
+                pixel_array=fake_array,
+                width=100,
+                height=100,
+                min_intensity=0,
+                max_intensity=256,
+                metadata={"slice_location": 42.0},
+            )
+        )
+
+        pre_session.add_slice(
+            SeriesSlice(
+                index="07",
+                filename="scan_a.dcm",
+                pixel_array=fake_array,
+                width=100,
+                height=100,
+                min_intensity=0,
+                max_intensity=256,
+                metadata={"slice_location": 43.0},  # within tolerance
+            )
+        )
+
+        response = client.post(
+            "/series/subtract",
+            json={
+                "post_session_id": post_id,
+                "pre_session_id": pre_id,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
 
         # Cleanup
         session_store.delete_session(post_id)

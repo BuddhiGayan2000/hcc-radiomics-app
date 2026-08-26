@@ -19,36 +19,97 @@ from PIL import Image
 from app.models.dicom_handler import (
     parse_dicom_file,
     apply_windowing,
-    extract_slice_index,
-    align_series,
+    slice_sort_key,
+    assign_slice_indices,
+    best_slice_position,
     subtract_images,
     normalize_for_display,
     array_to_png_base64,
     DICOMParseError,
-    SeriesAlignmentError,
 )
 
 
-class TestExtractSliceIndex:
-    """Test filename parsing to extract slice indices."""
+class TestSliceSortKey:
+    """Test ordering-key selection, independent of filename convention."""
 
-    def test_valid_filename(self):
-        """Extract index from valid DICOM filename."""
-        assert extract_slice_index("1-01.dcm") == "01"
-        assert extract_slice_index("1-05.dcm") == "05"
-        assert extract_slice_index("1-20.dcm") == "20"
+    def test_prefers_slice_location(self):
+        """SliceLocation should win over instance_number/filename when present."""
+        a = {"slice_location": 10.0, "instance_number": 5, "filename": "z.dcm"}
+        b = {"slice_location": 5.0, "instance_number": 1, "filename": "a.dcm"}
+        assert slice_sort_key(b) < slice_sort_key(a)
 
-    def test_case_insensitive(self):
-        """Filename parsing should be case-insensitive."""
-        assert extract_slice_index("1-01.DCM") == "01"
-        assert extract_slice_index("1-05.DcM") == "05"
+    def test_falls_back_to_image_position_z(self):
+        """ImagePositionPatient z should be used when SliceLocation is absent."""
+        a = {"image_position_z": 20.0, "filename": "a.dcm"}
+        b = {"image_position_z": 5.0, "filename": "b.dcm"}
+        assert slice_sort_key(b) < slice_sort_key(a)
 
-    def test_invalid_filename(self):
-        """Return None for filenames that don't match pattern."""
-        assert extract_slice_index("2-01.dcm") is None  # Wrong prefix
-        assert extract_slice_index("1-1.dcm") is None  # No leading zero
-        assert extract_slice_index("image.dcm") is None  # Wrong format
-        assert extract_slice_index("1-ab.dcm") is None  # Non-numeric
+    def test_falls_back_to_instance_number(self):
+        """InstanceNumber should be used when no position metadata exists."""
+        a = {"instance_number": 10, "filename": "a.dcm"}
+        b = {"instance_number": 2, "filename": "b.dcm"}
+        assert slice_sort_key(b) < slice_sort_key(a)
+
+    def test_falls_back_to_filename_as_last_resort(self):
+        """With no DICOM metadata at all, filename is the last-resort tiebreaker."""
+        a = {"filename": "IMG1000012.dcm"}
+        b = {"filename": "1-012.dcm"}
+        # Whatever the filenames look like, sorting must be deterministic and
+        # must not raise — the app no longer assumes any naming convention.
+        assert slice_sort_key(b) < slice_sort_key(a)
+
+    def test_position_always_outranks_instance_and_filename(self):
+        """A file with position metadata sorts before one without, regardless of values."""
+        has_position = {"slice_location": 999.0, "filename": "a.dcm"}
+        no_position = {"instance_number": 1, "filename": "z.dcm"}
+        assert slice_sort_key(has_position) < slice_sort_key(no_position)
+
+
+class TestAssignSliceIndices:
+    """Test assigning zero-padded slice indices from arbitrary filenames."""
+
+    def test_orders_by_slice_location_regardless_of_filename(self):
+        """Real-world filenames (no shared convention) still order correctly."""
+        metadata_list = [
+            {"slice_location": 30.0, "filename": "IMG1000012.dcm"},
+            {"slice_location": 10.0, "filename": "scan_a.dcm"},
+            {"slice_location": 20.0, "filename": "1-012.dcm"},
+        ]
+        indices = assign_slice_indices(metadata_list)
+
+        # metadata_list[1] (location 10.0) should be first, etc.
+        assert indices[1] == "01"
+        assert indices[2] == "02"
+        assert indices[0] == "03"
+
+    def test_zero_pads_to_batch_size(self):
+        """Index width should grow with slice count (e.g. 3 digits for >99 slices)."""
+        metadata_list = [{"instance_number": i, "filename": f"f{i}.dcm"} for i in range(150)]
+        indices = assign_slice_indices(metadata_list)
+
+        assert len(indices[0]) == 3
+        assert indices == sorted(indices)  # zero-padding keeps lexicographic order numeric
+
+    def test_no_metadata_still_produces_deterministic_indices(self):
+        """Files with no position/instance metadata at all still get an order, never an error."""
+        metadata_list = [{"filename": "b.dcm"}, {"filename": "a.dcm"}]
+        indices = assign_slice_indices(metadata_list)
+
+        assert sorted(indices) == ["01", "02"]
+        assert len(set(indices)) == 2  # each file gets a distinct index
+
+
+class TestBestSlicePosition:
+    """Test extraction of the best-available physical position."""
+
+    def test_prefers_slice_location(self):
+        assert best_slice_position({"slice_location": 12.5, "image_position_z": 99.0}) == 12.5
+
+    def test_falls_back_to_image_position_z(self):
+        assert best_slice_position({"image_position_z": 7.0}) == 7.0
+
+    def test_returns_none_without_position_metadata(self):
+        assert best_slice_position({"instance_number": 3, "filename": "a.dcm"}) is None
 
 
 class TestWindowing:
@@ -174,53 +235,6 @@ class TestArrayToPNGBase64:
         b64 = array_to_png_base64(array)
 
         assert b64.startswith("data:image/png;base64,")
-
-
-class TestAlignSeries:
-    """Test pre/post series alignment by filename."""
-
-    def test_align_simple(self):
-        """Align two lists of matching filenames."""
-        post = ["/path/1-01.dcm", "/path/1-02.dcm", "/path/1-03.dcm"]
-        pre = ["/path/1-03.dcm", "/path/1-01.dcm", "/path/1-02.dcm"]
-
-        pairs = align_series(post, pre)
-
-        # Should be sorted by index
-        assert len(pairs) == 3
-        assert pairs[0] == ("/path/1-01.dcm", "/path/1-01.dcm", "01")
-        assert pairs[1] == ("/path/1-02.dcm", "/path/1-02.dcm", "02")
-        assert pairs[2] == ("/path/1-03.dcm", "/path/1-03.dcm", "03")
-
-    def test_align_partial_overlap(self):
-        """Should only return matching pairs."""
-        post = ["/path/1-01.dcm", "/path/1-02.dcm", "/path/1-03.dcm"]
-        pre = ["/path/1-01.dcm", "/path/1-02.dcm"]  # Missing slice 3
-
-        pairs = align_series(post, pre)
-
-        # Only slices 1-2 should match
-        assert len(pairs) == 2
-        assert pairs[0][2] == "01"
-        assert pairs[1][2] == "02"
-
-    def test_align_no_common_slices(self):
-        """Should raise error if no slices match."""
-        post = ["/path/1-01.dcm", "/path/1-02.dcm"]
-        pre = ["/path/1-03.dcm", "/path/1-04.dcm"]  # Completely different
-
-        with pytest.raises(SeriesAlignmentError, match="No matching slices"):
-            align_series(post, pre)
-
-    def test_align_sorted_output(self):
-        """Output should be sorted by slice index."""
-        post = ["/path/1-20.dcm", "/path/1-05.dcm", "/path/1-01.dcm"]
-        pre = ["/path/1-01.dcm", "/path/1-20.dcm", "/path/1-05.dcm"]
-
-        pairs = align_series(post, pre)
-
-        indices = [p[2] for p in pairs]
-        assert indices == ["01", "05", "20"]
 
 
 class TestParseDICOMFile:
