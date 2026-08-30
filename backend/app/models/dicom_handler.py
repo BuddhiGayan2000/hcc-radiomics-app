@@ -179,9 +179,10 @@ def apply_windowing(
 def subtract_images(
     post_array: np.ndarray,
     pre_array: np.ndarray,
+    clip_negative: bool = True,
 ) -> np.ndarray:
     """
-    Compute subtracted image: Post - Pre (with clipping to [0, max]).
+    Compute subtracted image: Post - Pre.
 
     Subtraction enhances regions that are brighter in post-contrast image
     (e.g., vascularized tumors that accumulate contrast).
@@ -189,9 +190,14 @@ def subtract_images(
     Args:
         post_array: Post-contrast pixel array
         pre_array: Pre-contrast pixel array
+        clip_negative: If True (default), clip negative differences to 0 —
+            used for the raw array feeding radiomic feature extraction, which
+            only cares about positive enhancement. Pass False to keep the
+            signed difference, which the display path needs so washout can
+            darken instead of being indistinguishable from "no change".
 
     Returns:
-        Subtracted array (Post - Pre, clipped to >= 0)
+        Subtracted array (Post - Pre), clipped to >= 0 if clip_negative
     """
     if post_array.shape != pre_array.shape:
         raise ValueError(
@@ -199,7 +205,8 @@ def subtract_images(
         )
 
     subtracted = post_array - pre_array
-    subtracted = np.maximum(subtracted, 0)  # Clip to >= 0
+    if clip_negative:
+        subtracted = np.maximum(subtracted, 0)
 
     return subtracted
 
@@ -226,6 +233,28 @@ def normalize_for_display(array: np.ndarray) -> np.ndarray:
 
     normalized = ((array - min_val) / (max_val - min_val) * 255).astype(np.uint8)
     return normalized
+
+
+def normalize_subtraction_for_display(diff_array: np.ndarray) -> np.ndarray:
+    """
+    Map a *signed* post-minus-pre difference to a gray-centered [0, 255] image.
+
+    Standard contrast-subtraction convention: unchanged tissue (difference 0)
+    renders as mid-gray (128), enhancement (positive difference) brightens
+    toward white, and washout (negative difference) darkens toward black.
+    Unlike normalize_for_display, this uses a fixed scale rather than
+    stretching to the array's own min/max, so a single outlier pixel can't
+    crush the rest of the image toward black.
+
+    Args:
+        diff_array: Signed difference (post - pre), e.g. from
+            subtract_images(..., clip_negative=False)
+
+    Returns:
+        uint8 array in [0, 255], 128 == no change
+    """
+    scaled = 128.0 + diff_array / 2.0
+    return np.clip(scaled, 0, 255).astype(np.uint8)
 
 
 def array_to_png_base64(array: np.ndarray) -> str:

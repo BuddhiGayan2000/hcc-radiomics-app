@@ -22,6 +22,7 @@ from app.models.dicom_handler import (
     array_to_png_base64,
     apply_windowing,
     normalize_for_display,
+    normalize_subtraction_for_display,
 )
 from app.models.session_store import get_session_store, SeriesSlice
 from app.schemas.series import (
@@ -397,10 +398,12 @@ async def subtract_series(request: SubtractSeriesRequest) -> SubtractSeriesRespo
             post_windowed = apply_windowing(post_slice.pixel_array)
             pre_windowed = apply_windowing(pre_slice.pixel_array)
 
-            # Compute subtraction
+            # Compute subtraction (signed — keep washout visible for display,
+            # rather than clipping it to 0 like the feature-extraction array)
             subtracted_windowed = subtract_images(
                 post_windowed.astype(np.float32),
                 pre_windowed.astype(np.float32),
+                clip_negative=False,
             )
 
             # Also compute on raw data for feature extraction later
@@ -409,8 +412,11 @@ async def subtract_series(request: SubtractSeriesRequest) -> SubtractSeriesRespo
                 pre_slice.pixel_array.astype(np.float32),
             )
 
-            # Normalize for display
-            subtracted_display = normalize_for_display(subtracted_windowed)
+            # Gray-centered normalize for display: no-change tissue -> mid-gray,
+            # enhancement -> brighter, washout -> darker (matches standard
+            # subtraction-imaging convention, avoids the old min/max stretch
+            # crushing everything toward black)
+            subtracted_display = normalize_subtraction_for_display(subtracted_windowed)
 
             # Encode as base64 PNG
             image_b64 = array_to_png_base64(subtracted_display)
