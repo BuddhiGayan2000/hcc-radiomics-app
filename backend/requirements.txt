@@ -5,6 +5,7 @@ fastapi==0.141.1
 uvicorn[standard]==0.34.0
 pydantic==2.13.4
 python-dotenv==1.2.3
+python-multipart==0.0.20
 
 scikit-learn==1.8.0
 imbalanced-learn==0.14.2
