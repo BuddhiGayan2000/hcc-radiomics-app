@@ -244,14 +244,6 @@ function SeriesUploadStep({ title, subtitle, files, onFilesChange, onContinue, u
         </div>
       )}
 
-      <div className="text-[11px] mt-5 px-3 py-2 rounded flex gap-2 items-start text-left" style={{ background: "#FBFAF7", color: COLORS.inkSoft }}>
-        <Info size={13} className="shrink-0 mt-0.5" />
-        Select every .dcm file in this phase&rsquo;s series folder (use Ctrl/Cmd+A
-        in the file picker). Filenames don&rsquo;t need to match anything &mdash;
-        slices are ordered and matched between phases using each file&rsquo;s own
-        DICOM position metadata.
-      </div>
-
       {canGoBack && (
         <button onClick={onBack} className="text-xs mt-4" style={{ color: COLORS.inkSoft }}>
           &larr; Back
@@ -651,7 +643,6 @@ export default function App() {
             </div>
             <div>
               <div className="text-white text-sm font-semibold tracking-wide">HCC RADIOMICS &middot; DECISION SUPPORT</div>
-              <div className="text-[11px]" style={{ color: "#9AA7B8", fontFamily: "'IBM Plex Mono', monospace" }}>RESEARCH PROTOTYPE &middot; v0.3</div>
             </div>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
@@ -672,7 +663,6 @@ export default function App() {
         {step === 1 && (
           <SeriesUploadStep
             title="Step 1 — Upload post-contrast DICOM series"
-            subtitle="Select every .dcm file in the post-contrast phase folder for this patient."
             files={postFiles}
             onFilesChange={setPostFiles}
             onContinue={handlePostContinue}
@@ -685,7 +675,6 @@ export default function App() {
         {step === 2 && (
           <SeriesUploadStep
             title="Step 2 — Upload pre-contrast DICOM series"
-            subtitle="Select every .dcm file in the matching pre-contrast phase folder (same patient, same slice positions)."
             files={preFiles}
             onFilesChange={setPreFiles}
             onContinue={handlePreContinue}
@@ -781,15 +770,6 @@ export default function App() {
         {step === 4 && features && (
           <div className="rounded-lg p-6 border" style={{ background: COLORS.panel, borderColor: COLORS.hairline }}>
             <SectionHeader eyebrow="Step 4" title="Features extracted from your drawn ROI" />
-            <div className="text-xs mb-4 px-3 py-2 rounded flex gap-2 items-start" style={{ background: COLORS.tealSoft, color: COLORS.teal }}>
-              <Info size={14} className="shrink-0 mt-0.5" />
-              These 25 values were computed server-side directly from the pixels
-              inside the ROI you drew on the subtracted image (genuine
-              calculation — not a placeholder). <b className="mx-1">TOP</b> marks
-              the 12 SHAP-selected features. Liver-context features (*) use the
-              rest of the image, excluding background, as a proxy for
-              whole-liver context.
-            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {Object.entries(GROUP_LABELS).map(([gk, gl]) => (
                 <div key={gk}>
@@ -869,18 +849,6 @@ export default function App() {
             <div className="rounded-lg p-5 border" style={{ background: COLORS.panel, borderColor: COLORS.hairline }}>
               <EvidenceStrip contributions={result.contributions} />
             </div>
-            <div className="rounded-lg p-4 border text-xs leading-relaxed" style={{ background: "#FBFAF7", borderColor: COLORS.hairline, color: COLORS.inkSoft }}>
-              <div className="font-semibold mb-1" style={{ color: COLORS.ink }}>Served by your real trained models</div>
-              Staging prediction: <b>{stagingModel}</b> (your uploaded
-              <code> {stagingModel === "XGBoost" ? "best_model_XGBoost.joblib" : `model_${stagingModel}.joblib`}</code>).
-              Necrotic prediction: your uploaded
-              <code> best_necrotic_vs_others_model_RandomForest.joblib</code>.
-              Both ran via the local inference API — DICOM parsing, series
-              subtraction, ROI feature extraction, scaling, and classification
-              above are all genuine, using the actual models from your study.
-              Evidence values are real SHAP contributions computed server-side
-              with <code>shap.TreeExplainer</code>.
-            </div>
             <div className="flex justify-between">
               <button onClick={() => setStep(4)} className="text-xs" style={{ color: COLORS.inkSoft }}>&larr; Back to features</button>
               <button
@@ -895,18 +863,6 @@ export default function App() {
         )}
       </div>
 
-      <div className="w-full px-6 py-3 flex items-center gap-3 border-t" style={{ background: "#FBEAE8", borderColor: "#E8C4BE" }}>
-        <AlertTriangle size={18} color={COLORS.advanced} className="shrink-0" />
-        <div className="text-xs" style={{ color: "#7A2A21" }}>
-          <b>Research prototype — not a diagnostic device.</b> DICOM parsing,
-          series subtraction, feature extraction and predictions now use your
-          real trained models via the local inference API, but this pipeline
-          has not undergone clinical/regulatory validation (external cohort
-          testing, prospective evaluation, calibration review). All outputs
-          must be confirmed by a qualified radiologist before any clinical use.
-        </div>
-        <FileWarning size={16} color={COLORS.advanced} className="ml-auto shrink-0 opacity-60" />
-      </div>
     </div>
   );
 }
