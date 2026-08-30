@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   AlertTriangle, Activity, FileWarning, Info,
   RotateCcw, FolderOpen, Check, ArrowRight, Eraser, Undo2, Loader2,
+  ChevronLeft, ChevronRight,
 } from "lucide-react";
 
 // ============================================================================
@@ -260,31 +261,79 @@ function SeriesUploadStep({ title, subtitle, files, onFilesChange, onContinue, u
   );
 }
 
-function SliceGallery({ slices, onSelect }) {
+function SliceCarousel({ slices, onSelect }) {
+  const [idx, setIdx] = useState(0);
+
+  const goPrev = useCallback(() => setIdx((i) => Math.max(0, i - 1)), []);
+  const goNext = useCallback(() => setIdx((i) => Math.min(slices.length - 1, i + 1)), [slices.length]);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "ArrowLeft") { e.preventDefault(); goPrev(); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); goNext(); }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [goPrev, goNext]);
+
+  const current = slices[idx];
+
   return (
     <div>
       <div className="text-xs mb-3 px-3 py-2 rounded flex gap-2 items-start" style={{ background: COLORS.tealSoft, color: COLORS.teal }}>
         <Info size={14} className="shrink-0 mt-0.5" />
         {slices.length} matching slices were aligned and subtracted (post &minus; pre).
-        Pick the slice that shows the clearest tumor enhancement.
+        Use the &larr; &rarr; arrow keys to step through the stack and pick the slice with the clearest tumor enhancement.
       </div>
-      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
-        {slices.map((s) => (
-          <button
-            key={s.index}
-            onClick={() => onSelect(s)}
-            className="rounded border overflow-hidden hover:ring-2 transition"
-            style={{ borderColor: COLORS.hairline }}
-          >
-            <img
-              src={s.image_data_b64}
-              alt={`Slice ${s.index}`}
-              className="w-full block"
-              style={{ aspectRatio: "1 / 1", objectFit: "cover" }}
-            />
-            <div className="text-[10px] py-1" style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLORS.inkSoft }}>#{s.index}</div>
-          </button>
-        ))}
+
+      <div
+        className="relative flex items-center justify-center"
+        style={{ background: COLORS.ink, borderRadius: 8, border: `1px solid ${COLORS.hairline}`, minHeight: 480 }}
+      >
+        <button
+          onClick={goPrev}
+          disabled={idx === 0}
+          aria-label="Previous slice"
+          className="absolute left-2 z-10 rounded-full p-1.5 disabled:opacity-25 hover:bg-white/10 transition"
+        >
+          <ChevronLeft size={32} color="white" />
+        </button>
+
+        <img
+          key={current.index}
+          src={current.image_data_b64}
+          alt={`Slice ${current.index}`}
+          draggable={false}
+          className="block select-none"
+          style={{ maxHeight: 600, maxWidth: "100%", objectFit: "contain" }}
+        />
+
+        <button
+          onClick={goNext}
+          disabled={idx === slices.length - 1}
+          aria-label="Next slice"
+          className="absolute right-2 z-10 rounded-full p-1.5 disabled:opacity-25 hover:bg-white/10 transition"
+        >
+          <ChevronRight size={32} color="white" />
+        </button>
+      </div>
+
+      <div
+        className="flex items-center justify-between mt-2 text-xs"
+        style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLORS.inkSoft }}
+      >
+        <span>Slice #{current.index}</span>
+        <span>{idx + 1} / {slices.length}</span>
+      </div>
+
+      <div className="text-center mt-4">
+        <button
+          onClick={() => onSelect(current)}
+          className="px-4 py-1.5 rounded-md text-xs font-medium text-white"
+          style={{ background: COLORS.teal }}
+        >
+          Draw ROI on slice #{current.index}
+        </button>
       </div>
     </div>
   );
@@ -669,7 +718,7 @@ export default function App() {
 
             {!subtractLoading && subtractedSeries && !selectedSlice && (
               <>
-                <SliceGallery slices={subtractedSeries} onSelect={handleSelectSlice} />
+                <SliceCarousel slices={subtractedSeries} onSelect={handleSelectSlice} />
                 <div className="text-center mt-4">
                   <button onClick={() => setStep(2)} className="text-xs" style={{ color: COLORS.inkSoft }}>&larr; Back to pre-contrast upload</button>
                 </div>

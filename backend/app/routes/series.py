@@ -21,7 +21,6 @@ from app.models.dicom_handler import (
     subtract_images,
     array_to_png_base64,
     apply_windowing,
-    normalize_for_display,
     normalize_subtraction_for_display,
 )
 from app.models.session_store import get_session_store, SeriesSlice
